@@ -1,27 +1,49 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 import requests
+import logging
 
 app = Flask(__name__)
-
 API_B_URL = "http://localhost:5001/weather/"
+
+logging.basicConfig(level=logging.INFO)
 
 @app.route('/recommendation/<city>', methods=['GET'])
 def get_recommendation(city):
-    # Requisição à API B
+    if not city.strip():
+        return jsonify({"error": "City name must be provided"}), 400
+
+    # Monta a URL para a chamada da API B
+    url = f"{API_B_URL}{city}"
+    logging.info(f"Fetching weather for city: {city} from {url}")
+
     try:
-        response = requests.get(f"{API_B_URL}{city}")
-        if response.status_code == 404:
-            return jsonify({"error": "City not found in weather service"}), 404
-        elif response.status_code != 200:
-            return jsonify({"error": "Weather service error"}), 500
+        response = requests.get(url, timeout=5)
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "Weather service timed out"}), 504
+    except requests.exceptions.ConnectionError:
+        return jsonify({"error": "Unable to connect to the weather service"}), 503
     except requests.exceptions.RequestException as e:
-        return jsonify({"error": "Error connecting to weather service", "details": str(e)}), 500
+        logging.error(f"Unexpected request error: {e}")
+        return jsonify({"error": "Unexpected error while requesting weather data"}), 500
 
-    weather = response.json()
+    if response.status_code == 404:
+        return jsonify({"error": "City not found in weather service"}), 404
+    elif response.status_code != 200:
+        return jsonify({
+            "error": "Weather service returned an unexpected error",
+            "status_code": response.status_code
+        }), 502
+
+    try:
+        weather = response.json()
+    except ValueError:
+        logging.error("Invalid JSON response from weather service")
+        return jsonify({"error": "Invalid response format from weather service"}), 502
     temp = weather.get("temp")
+    city_name = weather.get("city")
 
-    if temp is None:
-        return jsonify({"error": "Temperature data not found"}), 500
+    if temp is None or city_name is None:
+        return jsonify({"error": "Incomplete weather data received"}), 502
 
     if temp > 30:
         recommendation = "It's very hot. Stay hydrated and use sunscreen!"
@@ -31,7 +53,7 @@ def get_recommendation(city):
         recommendation = "It's cold. Don't forget to wear a jacket!"
 
     return jsonify({
-        "city": weather["city"],
+        "city": city_name,
         "temperature": f"{temp} °C",
         "recommendation": recommendation
     })
