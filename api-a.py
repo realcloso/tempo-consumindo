@@ -1,62 +1,77 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify
 import requests
+import redis
+import json
 import logging
 
 app = Flask(__name__)
 API_B_URL = "http://localhost:5001/weather/"
+CACHE_EXPIRATION = 60  # segundos
 
-logging.basicConfig(level=logging.INFO)
+# Conexão com Redis
+try:
+    cache = redis.StrictRedis(host='localhost', port=6379, db=0, decode_responses=True)
+    cache.ping()
+    logging.info("Connected to Redis")
+except redis.exceptions.ConnectionError as e:
+    logging.error("Could not connect to Redis")
+    cache = None
 
 @app.route('/recommendation/<city>', methods=['GET'])
 def get_recommendation(city):
     if not city.strip():
         return jsonify({"error": "City name must be provided"}), 400
 
-    # Monta a URL para a chamada da API B
-    url = f"{API_B_URL}{city}"
-    logging.info(f"Fetching weather for city: {city} from {url}")
+    city_key = city.replace(" ", "").lower()
 
-    try:
-        response = requests.get(url, timeout=5)
-    except requests.exceptions.Timeout:
-        return jsonify({"error": "Weather service timed out"}), 504
-    except requests.exceptions.ConnectionError:
-        return jsonify({"error": "Unable to connect to the weather service"}), 503
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Unexpected request error: {e}")
-        return jsonify({"error": "Unexpected error while requesting weather data"}), 500
+    # Tenta buscar no cache
+    if cache:
+        cached_data = cache.get(city_key)
+        if cached_data:
+            logging.info(f"Cache hit for city: {city_key}")
+            data = json.loads(cached_data)
+        else:
+            logging.info(f"Cache miss for city: {city_key}")
+            data = fetch_and_cache_weather(city_key)
+    else:
+        data = fetch_and_cache_weather(city_key)
 
-    if response.status_code == 404:
-        return jsonify({"error": "City not found in weather service"}), 404
-    elif response.status_code != 200:
-        return jsonify({
-            "error": "Weather service returned an unexpected error",
-            "status_code": response.status_code
-        }), 502
+    if not data:
+        return jsonify({"error": "Could not get weather data"}), 500
 
-    try:
-        weather = response.json()
-    except ValueError:
-        logging.error("Invalid JSON response from weather service")
-        return jsonify({"error": "Invalid response format from weather service"}), 502
-    temp = weather.get("temp")
-    city_name = weather.get("city")
+    temp = data.get("temp")
+    city_name = data.get("city")
 
     if temp is None or city_name is None:
-        return jsonify({"error": "Incomplete weather data received"}), 502
+        return jsonify({"error": "Incomplete data"}), 502
 
     if temp > 30:
-        recommendation = "It's very hot. Stay hydrated and use sunscreen!"
+        recommendation = "Está quente! Beba água e use protetor solar."
     elif temp > 15:
-        recommendation = "The weather is nice. Enjoy your day!"
+        recommendation = "Clima agradável! Aproveite o dia."
     else:
-        recommendation = "It's cold. Don't forget to wear a jacket!"
+        recommendation = "Está frio! Leve um casaco."
 
     return jsonify({
         "city": city_name,
-        "temperature": f"{temp} °C",
+        "temp": temp,
         "recommendation": recommendation
     })
+
+def fetch_and_cache_weather(city_key):
+    try:
+        response = requests.get(f"{API_B_URL}{city_key}", timeout=5)
+        if response.status_code != 200:
+            return None
+        data = response.json()
+
+        if cache:
+            cache.setex(city_key, CACHE_EXPIRATION, json.dumps(data))
+
+        return data
+    except Exception as e:
+        logging.error(f"Error fetching data from API B: {e}")
+        return None
 
 if __name__ == '__main__':
     app.run(port=5000, debug=True)
